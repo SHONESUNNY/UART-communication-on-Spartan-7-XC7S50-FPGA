@@ -1,0 +1,90 @@
+module uart_top (
+    input  logic       clk,
+    input  logic [3:0] btn,
+
+    input  logic       UART_rxd,
+    output logic       UART_txd
+);
+
+    localparam integer FIFO_DEPTH = 16;
+    localparam integer PTR_W      = $clog2(FIFO_DEPTH);
+    localparam integer COUNT_W    = $clog2(FIFO_DEPTH + 1);
+
+    // Boolean Board button 0 is active-high.
+    logic rst;
+    assign rst = btn[0];
+
+    // Receiver interface
+    logic [7:0] rx_data;
+    logic       rx_valid;
+
+    // Transmitter interface
+    logic [7:0] tx_data;
+    logic       tx_start;
+    logic       tx_busy;
+
+    // Small circular FIFO for received bytes
+    logic [7:0] fifo_mem [0:FIFO_DEPTH-1];
+    logic [PTR_W-1:0] wr_ptr;
+    logic [PTR_W-1:0] rd_ptr;
+    logic [COUNT_W-1:0] fifo_count;
+
+    logic tx_launch;
+    logic fifo_push;
+
+    uart_rx #(
+        .CLK_HZ(100_000_000),
+        .BAUD(115_200)
+    ) receiver (.clk(clk), .rst(rst),
+        .rx(UART_rxd),.data_out(rx_data),.data_valid(rx_valid)
+    );
+
+    uart_tx #(
+        .CLK_HZ(100_000_000),.BAUD(115_200)
+    ) transmitter (
+        .clk(clk),.rst(rst),.data_in(tx_data),
+        .start(tx_start),.tx(UART_txd),.busy(tx_busy)
+    );
+
+    // Launch a byte whenever the transmitter can accept one.
+    always_comb begin
+        tx_launch = (fifo_count != 0)&& !tx_busy&& !tx_start;
+
+        // If the FIFO is full, accept a new byte only if
+        // an old byte is removed during the same clock cycle.
+        fifo_push = rx_valid&&((fifo_count < FIFO_DEPTH) || tx_launch);
+    end
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            wr_ptr     <= '0;
+            rd_ptr     <= '0;
+            fifo_count <= '0;
+            tx_data    <= '0;
+            tx_start   <= 1'b0;
+        end else begin
+            // Default to no start request.
+            tx_start <= 1'b0;
+
+            // Enqueue the received byte.
+            if (fifo_push) begin
+                fifo_mem[wr_ptr] <= rx_data;
+                wr_ptr <= wr_ptr + 1'b1;
+            end
+
+            // Remove one byte and request its transmission.
+            if (tx_launch) begin
+                tx_data  <= fifo_mem[rd_ptr];
+                rd_ptr   <= rd_ptr + 1'b1;
+                tx_start <= 1'b1;
+            end
+
+            case ({fifo_push, tx_launch})
+                2'b10: fifo_count <= fifo_count + 1'b1;
+                2'b01: fifo_count <= fifo_count - 1'b1;
+                default: fifo_count <= fifo_count;
+            endcase
+        end
+    end
+
+endmodule
